@@ -62,7 +62,9 @@ metric_file() { echo "$METRICS_DIR/backup_toolkit_${1}.prom"; }
 # Keeps the previous value of a metric, so a failed run doesn't erase the last success time.
 previous_metric() {
   local file="$1" name="$2"
-  [[ -r "$file" ]] && awk -v n="$name" '$1 ~ "^"n"({|$)" {print $2}' "$file" | tail -1 || true
+  if [[ -r "$file" ]]; then
+    awk -v n="$name" '$1 ~ "^"n"({|$)" {print $2}' "$file" | tail -1
+  fi
 }
 
 write_metrics() {
