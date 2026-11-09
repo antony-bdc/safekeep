@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# backup-toolkit: encrypted, monitored restic backups with automatic restore tests.
+# https://github.com/businessantonybdc-crypto/backup-toolkit
+set -Eeuo pipefail
+
+VERSION="1.0.0"
+CONFIG_FILE="${BACKUP_TOOLKIT_CONFIG:-/etc/backup-toolkit/backup.env}"
+
+log()  { printf '%s [%s] %s\n' "$(date -Is)" "$1" "${*:2}" >&2; }
+info() { log INFO "$@"; }
+warn() { log WARN "$@"; }
+die()  { log ERROR "$@"; exit 1; }
+
+usage() {
+  cat <<USAGE
+backup-toolkit $VERSION
+
+Usage: backup-toolkit <command>
+
+Commands:
+  init           create the restic repository (first run only)
+  backup         run pre-hooks, back up, apply retention, run post-hooks
+  restore-test   restore random files from the latest snapshot and verify them
+  snapshots      list snapshots
+  status         show last run, last success and repository size
+  version        print version
+
+Config: $CONFIG_FILE (override with BACKUP_TOOLKIT_CONFIG)
+USAGE
+}
+
+load_config() {
+  [[ -r "$CONFIG_FILE" ]] || die "config not readable: $CONFIG_FILE"
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+
+  : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is not set}"
+  : "${RESTIC_PASSWORD_FILE:?RESTIC_PASSWORD_FILE is not set}"
+  : "${BACKUP_PATHS:?BACKUP_PATHS is not set}"
+  export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE
+
+  BACKUP_TAG="${BACKUP_TAG:-$(hostname -s)}"
+  EXCLUDE_FILE="${EXCLUDE_FILE:-}"
+  KEEP_DAILY="${KEEP_DAILY:-7}"
+  KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
+  KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
+  HOOKS_DIR="${HOOKS_DIR:-/etc/backup-toolkit/hooks}"
+  METRICS_DIR="${METRICS_DIR:-/var/lib/node_exporter/textfile_collector}"
+  LOCK_FILE="${LOCK_FILE:-/run/lock/backup-toolkit.lock}"
+  RESTORE_TEST_FILES="${RESTORE_TEST_FILES:-20}"
+  HEALTHCHECK_URL="${HEALTHCHECK_URL:-}"
+  DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
+
+  command -v restic >/dev/null || die "restic is not installed"
+  [[ -r "$RESTIC_PASSWORD_FILE" ]] || die "password file not readable: $RESTIC_PASSWORD_FILE"
+}
+
+# ---------------------------------------------------------------- metrics ---
+
+metric_file() { echo "$METRICS_DIR/backup_toolkit_${1}.prom"; }
+
+# Keeps the previous value of a metric, so a failed run doesn't erase the last success time.
+previous_metric() {
+  local file="$1" name="$2"
+  [[ -r "$file" ]] && awk -v n="$name" '$1 ~ "^"n"({|$)" {print $2}' "$file" | tail -1 || true
+}
+
+write_metrics() {
+  local kind="$1" exit_code="$2" duration="$3" now file tmp last_success
+  [[ -d "$METRICS_DIR" ]] || { warn "metrics dir $METRICS_DIR missing, skipping metrics"; return 0; }
+  now="$(date +%s)"
+  file="$(metric_file "$kind")"
+  last_success="$(previous_metric "$file" "backup_toolkit_${kind}_last_success_timestamp_seconds")"
+  [[ "$exit_code" -eq 0 ]] && last_success="$now"
+  tmp="$(mktemp "$METRICS_DIR/.backup_toolkit.XXXXXX")"
+  {
+    echo "# HELP backup_toolkit_${kind}_last_run_timestamp_seconds Unix time of the last ${kind} run."
+    echo "# TYPE backup_toolkit_${kind}_last_run_timestamp_seconds gauge"
+    echo "backup_toolkit_${kind}_last_run_timestamp_seconds{tag=\"$BACKUP_TAG\"} $now"
+    echo "# HELP backup_toolkit_${kind}_last_success_timestamp_seconds Unix time of the last successful ${kind} run."
+    echo "# TYPE backup_toolkit_${kind}_last_success_timestamp_seconds gauge"
+    echo "backup_toolkit_${kind}_last_success_timestamp_seconds{tag=\"$BACKUP_TAG\"} ${last_success:-0}"
+    echo "# HELP backup_toolkit_${kind}_last_exit_code Exit code of the last ${kind} run."
+    echo "# TYPE backup_toolkit_${kind}_last_exit_code gauge"
+    echo "backup_toolkit_${kind}_last_exit_code{tag=\"$BACKUP_TAG\"} $exit_code"
+    echo "# HELP backup_toolkit_${kind}_last_duration_seconds Duration of the last ${kind} run."
+    echo "# TYPE backup_toolkit_${kind}_last_duration_seconds gauge"
+    echo "backup_toolkit_${kind}_last_duration_seconds{tag=\"$BACKUP_TAG\"} $duration"
+    if [[ "$kind" == backup && "$exit_code" -eq 0 ]]; then
+      local count size
+      count="$(restic snapshots --tag "$BACKUP_TAG" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
+      size="$(restic stats --mode raw-data --json 2>/dev/null | jq '.total_size' 2>/dev/null || echo 0)"
+      echo "# HELP backup_toolkit_snapshots Number of snapshots for this tag."
+      echo "# TYPE backup_toolkit_snapshots gauge"
+      echo "backup_toolkit_snapshots{tag=\"$BACKUP_TAG\"} $count"
+      echo "# HELP backup_toolkit_repository_size_bytes Deduplicated size of the repository."
+      echo "# TYPE backup_toolkit_repository_size_bytes gauge"
+      echo "backup_toolkit_repository_size_bytes{tag=\"$BACKUP_TAG\"} $size"
+    fi
+  } >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$file"   # atomic: node_exporter never sees half a file
+}
+
+# ----------------------------------------------------------- notifications ---
+
+ping_healthcheck() {
+  [[ -n "$HEALTHCHECK_URL" ]] || return 0
+  curl -fsS -m 10 --retry 3 -o /dev/null "${HEALTHCHECK_URL}${1:-}" || warn "healthcheck ping failed"
+}
+
+notify_failure() {
+  local what="$1" code="$2"
+  [[ -n "$DISCORD_WEBHOOK_URL" ]] || return 0
+  local msg
+  msg="$(jq -n --arg c ":red_circle: **${what} failed** on \`$(hostname -s)\` (exit ${code}). Check \`journalctl -u backup-toolkit\`." '{content:$c}')"
+  curl -fsS -m 10 -H 'Content-Type: application/json' -d "$msg" "$DISCORD_WEBHOOK_URL" -o /dev/null \
+    || warn "discord notification failed"
+}
+
+# ------------------------------------------------------------------- hooks ---
+
+run_hooks() {
+  local stage="$1" dir="$HOOKS_DIR/$1.d" hook
+  [[ -d "$dir" ]] || return 0
+  for hook in "$dir"/*; do
+    [[ -f "$hook" && -x "$hook" ]] || continue
+    info "running $stage hook: $(basename "$hook")"
+    "$hook" || die "$stage hook failed: $hook"
+  done
+}
+
+# ---------------------------------------------------------------- commands ---
+
+with_lock() {
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || die "another backup-toolkit run is active ($LOCK_FILE)"
+  "$@"
+}
+
+run_tracked() {
+  local kind="$1"; shift
+  local start rc=0
+  start="$(date +%s)"
+  [[ "$kind" == backup ]] && ping_healthcheck /start
+  # Not "( ... ) || rc=$?": inside an || list bash silently disables errexit,
+  # so a failing restic call would not stop the run.
+  set +e
+  ( set -e; "$@" )
+  rc=$?
+  set -e
+  write_metrics "$kind" "$rc" "$(( $(date +%s) - start ))"
+  if [[ "$rc" -eq 0 ]]; then
+    info "$kind finished successfully"
+    [[ "$kind" == backup ]] && ping_healthcheck
+  else
+    warn "$kind failed with exit code $rc"
+    [[ "$kind" == backup ]] && ping_healthcheck /fail
+    notify_failure "$kind" "$rc"
+  fi
+  return "$rc"
+}
+
+do_init() {
+  if restic cat config >/dev/null 2>&1; then
+    info "repository already initialised"
+  else
+    restic init
+  fi
+}
+
+do_backup() {
+  local -a paths args
+  read -r -a paths <<<"$BACKUP_PATHS"
+  args=(--tag "$BACKUP_TAG" --one-file-system --exclude-caches)
+  [[ -n "$EXCLUDE_FILE" ]] && args+=(--exclude-file "$EXCLUDE_FILE")
+
+  # Post-hooks must run even if a pre-hook or the backup fails (e.g. to re-enable a
+  # game server's autosave). do_backup runs in its own subshell, so EXIT fires on die too.
+  trap 'run_hooks post' EXIT
+  run_hooks pre
+  info "backing up: ${paths[*]}"
+  restic backup "${args[@]}" "${paths[@]}"
+
+  info "applying retention (d=$KEEP_DAILY w=$KEEP_WEEKLY m=$KEEP_MONTHLY)"
+  restic forget --tag "$BACKUP_TAG" --group-by host,tags --prune \
+    --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" --keep-monthly "$KEEP_MONTHLY"
+
+  # Quick structural check after every run; the full data check is the restore test.
+  restic check
+}
+
+do_restore_test() {
+  local target snapshot listing count=0 failed=0 path
+  target="$(mktemp -d /tmp/backup-toolkit-restore.XXXXXX)"
+  # Global on purpose: the EXIT trap runs after this function's locals are gone.
+  RESTORE_DIR="$target"
+  trap 'rm -rf "${RESTORE_DIR:?}"' EXIT   # runs in a subshell, see run_tracked
+
+  snapshot="$(restic snapshots --tag "$BACKUP_TAG" --latest 1 --json | jq -r '.[-1].short_id // empty')"
+  [[ -n "$snapshot" ]] || die "no snapshot found for tag $BACKUP_TAG"
+  info "restore test against snapshot $snapshot ($RESTORE_TEST_FILES random files)"
+
+  listing="$(restic ls --json "$snapshot" | jq -r 'select(.type=="file" and .size > 0) | .path' \
+             | shuf -n "$RESTORE_TEST_FILES")"
+  [[ -n "$listing" ]] || die "snapshot $snapshot contains no files"
+
+  while IFS= read -r path; do
+    count=$((count + 1))
+    restic restore "$snapshot" --target "$target" --include "$path" >/dev/null
+    if [[ ! -f "$target$path" ]]; then
+      warn "missing after restore: $path"; failed=$((failed + 1)); continue
+    fi
+    # Compare against the live file only if it hasn't changed since the snapshot.
+    if [[ -f "$path" ]] && ! [[ "$path" -nt "$target$path" ]]; then
+      if ! cmp -s "$path" "$target$path"; then
+        warn "content mismatch: $path"; failed=$((failed + 1))
+      fi
+    fi
+  done <<<"$listing"
+
+  # Read a slice of the actual pack data to catch silent corruption in the repository.
+  restic check --read-data-subset=5%
+
+  info "restore test: $count files restored, $failed problems"
+  [[ "$failed" -eq 0 ]]
+}
+
+do_status() {
+  local f
+  for f in "$(metric_file backup)" "$(metric_file restore_test)"; do
+    [[ -r "$f" ]] && grep -v '^#' "$f"
+  done
+  restic snapshots --tag "$BACKUP_TAG" --compact | tail -n 5
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    init)         load_config; do_init ;;
+    backup)       load_config; with_lock run_tracked backup do_backup ;;
+    restore-test) load_config; with_lock run_tracked restore_test do_restore_test ;;
+    snapshots)    load_config; restic snapshots --tag "$BACKUP_TAG" ;;
+    status)       load_config; do_status ;;
+    version)      echo "$VERSION" ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+main "$@"

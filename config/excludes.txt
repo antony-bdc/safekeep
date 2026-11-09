@@ -1,0 +1,8 @@
+# restic exclude patterns
+/home/*/.cache
+/home/*/.local/share/Trash
+**/node_modules
+**/.venv
+**/__pycache__
+*.tmp
+*.swp

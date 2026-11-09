@@ -1,0 +1,3 @@
+*.password
+*.env
+!config/*.example

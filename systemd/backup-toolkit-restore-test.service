@@ -1,0 +1,13 @@
+[Unit]
+Description=backup-toolkit: weekly restore test
+After=backup-toolkit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-toolkit restore-test
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter /run/lock /root/.cache/restic /tmp
+PrivateTmp=true
+NoNewPrivileges=true

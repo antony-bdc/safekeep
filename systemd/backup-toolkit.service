@@ -1,0 +1,15 @@
+[Unit]
+Description=backup-toolkit: restic backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-toolkit backup
+Nice=10
+IOSchedulingClass=idle
+# Hardening: read everything, write only where backups/metrics/locks live.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter /run/lock /root/.cache/restic /tmp
+PrivateTmp=true
+NoNewPrivileges=true
