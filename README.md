@@ -1,4 +1,4 @@
-# backup-toolkit
+# safekeep
 
 Encrypted, deduplicated backups with [restic](https://restic.net), plus the part most setups skip:
 **proving the backup can actually be restored**, every week, automatically.
@@ -11,12 +11,12 @@ flowchart LR
     B --> M[(Prometheus metrics)]
     W[systemd timer<br/>weekly] --> R[restore test<br/>random files, compared byte by byte]
     R --> M
-    M --> A[homelab-monitoring<br/>alerts if a backup is late]
+    M --> A[observatory<br/>alerts if a backup is late]
 ```
 
 ## Features
 
-- **One command:** `backup-toolkit backup | restore-test | status | snapshots | init`
+- **One command:** `safekeep backup | restore-test | status | snapshots | init`
 - **Retention:** daily / weekly / monthly, pruned after every run
 - **Restore tests:** restores random files from the latest snapshot, compares them with the live files and reads 5 % of the raw pack data to catch silent corruption
 - **Hooks:** executable scripts in `hooks/pre.d` and `hooks/post.d`; post-hooks run even when a backup fails
@@ -29,27 +29,27 @@ flowchart LR
 ```bash
 sudo apt install restic jq curl
 sudo ./install.sh                       # binary, config skeleton, systemd timers
-sudo $EDITOR /etc/backup-toolkit/backup.env
-sudo backup-toolkit init
-sudo backup-toolkit backup
-sudo backup-toolkit status
+sudo $EDITOR /etc/safekeep/backup.env
+sudo safekeep init
+sudo safekeep backup
+sudo safekeep status
 ```
 
-`install.sh` generates a random repository password in `/etc/backup-toolkit/restic.password`.
+`install.sh` generates a random repository password in `/etc/safekeep/restic.password`.
 **Keep a copy somewhere else.** Without it the backups cannot be decrypted.
 
 ## Metrics
 
 ```text
-backup_toolkit_backup_last_success_timestamp_seconds{tag="mc-01"} 1762654512
-backup_toolkit_backup_last_duration_seconds{tag="mc-01"} 41
-backup_toolkit_backup_last_exit_code{tag="mc-01"} 0
-backup_toolkit_snapshots{tag="mc-01"} 23
-backup_toolkit_repository_size_bytes{tag="mc-01"} 5368709120
-backup_toolkit_restore_test_last_success_timestamp_seconds{tag="mc-01"} 1762567200
+safekeep_backup_last_success_timestamp_seconds{tag="mc-01"} 1762654512
+safekeep_backup_last_duration_seconds{tag="mc-01"} 41
+safekeep_backup_last_exit_code{tag="mc-01"} 0
+safekeep_snapshots{tag="mc-01"} 23
+safekeep_repository_size_bytes{tag="mc-01"} 5368709120
+safekeep_restore_test_last_success_timestamp_seconds{tag="mc-01"} 1762567200
 ```
 
-The matching alert rules (`BackupTooOld`, `RestoreTestFailing`) live in [homelab-monitoring](https://github.com/businessantonybdc-crypto/homelab-monitoring).
+The matching alert rules (`BackupTooOld`, `RestoreTestFailing`) live in [observatory](https://github.com/antony-bdc/observatory).
 
 ## Tests
 
@@ -66,4 +66,4 @@ CI runs it together with `shellcheck` on every push.
 
 ---
 
-Part of my homelab series → [server-baseline](https://github.com/businessantonybdc-crypto/server-baseline) · [minecraft-server-ops](https://github.com/businessantonybdc-crypto/minecraft-server-ops) · [homelab-monitoring](https://github.com/businessantonybdc-crypto/homelab-monitoring)
+Part of my homelab series → [bastion](https://github.com/antony-bdc/bastion) · [dwellers-galaxy](https://github.com/antony-bdc/dwellers-galaxy) · [observatory](https://github.com/antony-bdc/observatory)

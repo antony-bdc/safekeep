@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# backup-toolkit: encrypted, monitored restic backups with automatic restore tests.
-# https://github.com/businessantonybdc-crypto/backup-toolkit
+# safekeep: encrypted, monitored restic backups with automatic restore tests.
+# https://github.com/antony-bdc/safekeep
 set -Eeuo pipefail
 
 VERSION="1.0.0"
-CONFIG_FILE="${BACKUP_TOOLKIT_CONFIG:-/etc/backup-toolkit/backup.env}"
+CONFIG_FILE="${SAFEKEEP_CONFIG:-/etc/safekeep/backup.env}"
 
 log()  { printf '%s [%s] %s\n' "$(date -Is)" "$1" "${*:2}" >&2; }
 info() { log INFO "$@"; }
@@ -13,9 +13,9 @@ die()  { log ERROR "$@"; exit 1; }
 
 usage() {
   cat <<USAGE
-backup-toolkit $VERSION
+safekeep $VERSION
 
-Usage: backup-toolkit <command>
+Usage: safekeep <command>
 
 Commands:
   init           create the restic repository (first run only)
@@ -25,7 +25,7 @@ Commands:
   status         show last run, last success and repository size
   version        print version
 
-Config: $CONFIG_FILE (override with BACKUP_TOOLKIT_CONFIG)
+Config: $CONFIG_FILE (override with SAFEKEEP_CONFIG)
 USAGE
 }
 
@@ -44,9 +44,9 @@ load_config() {
   KEEP_DAILY="${KEEP_DAILY:-7}"
   KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
   KEEP_MONTHLY="${KEEP_MONTHLY:-6}"
-  HOOKS_DIR="${HOOKS_DIR:-/etc/backup-toolkit/hooks}"
+  HOOKS_DIR="${HOOKS_DIR:-/etc/safekeep/hooks}"
   METRICS_DIR="${METRICS_DIR:-/var/lib/node_exporter/textfile_collector}"
-  LOCK_FILE="${LOCK_FILE:-/run/lock/backup-toolkit.lock}"
+  LOCK_FILE="${LOCK_FILE:-/run/lock/safekeep.lock}"
   RESTORE_TEST_FILES="${RESTORE_TEST_FILES:-20}"
   HEALTHCHECK_URL="${HEALTHCHECK_URL:-}"
   DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
@@ -57,7 +57,7 @@ load_config() {
 
 # ---------------------------------------------------------------- metrics ---
 
-metric_file() { echo "$METRICS_DIR/backup_toolkit_${1}.prom"; }
+metric_file() { echo "$METRICS_DIR/safekeep_${1}.prom"; }
 
 # Keeps the previous value of a metric, so a failed run doesn't erase the last success time.
 previous_metric() {
@@ -72,32 +72,32 @@ write_metrics() {
   [[ -d "$METRICS_DIR" ]] || { warn "metrics dir $METRICS_DIR missing, skipping metrics"; return 0; }
   now="$(date +%s)"
   file="$(metric_file "$kind")"
-  last_success="$(previous_metric "$file" "backup_toolkit_${kind}_last_success_timestamp_seconds")"
+  last_success="$(previous_metric "$file" "safekeep_${kind}_last_success_timestamp_seconds")"
   [[ "$exit_code" -eq 0 ]] && last_success="$now"
-  tmp="$(mktemp "$METRICS_DIR/.backup_toolkit.XXXXXX")"
+  tmp="$(mktemp "$METRICS_DIR/.safekeep.XXXXXX")"
   {
-    echo "# HELP backup_toolkit_${kind}_last_run_timestamp_seconds Unix time of the last ${kind} run."
-    echo "# TYPE backup_toolkit_${kind}_last_run_timestamp_seconds gauge"
-    echo "backup_toolkit_${kind}_last_run_timestamp_seconds{tag=\"$BACKUP_TAG\"} $now"
-    echo "# HELP backup_toolkit_${kind}_last_success_timestamp_seconds Unix time of the last successful ${kind} run."
-    echo "# TYPE backup_toolkit_${kind}_last_success_timestamp_seconds gauge"
-    echo "backup_toolkit_${kind}_last_success_timestamp_seconds{tag=\"$BACKUP_TAG\"} ${last_success:-0}"
-    echo "# HELP backup_toolkit_${kind}_last_exit_code Exit code of the last ${kind} run."
-    echo "# TYPE backup_toolkit_${kind}_last_exit_code gauge"
-    echo "backup_toolkit_${kind}_last_exit_code{tag=\"$BACKUP_TAG\"} $exit_code"
-    echo "# HELP backup_toolkit_${kind}_last_duration_seconds Duration of the last ${kind} run."
-    echo "# TYPE backup_toolkit_${kind}_last_duration_seconds gauge"
-    echo "backup_toolkit_${kind}_last_duration_seconds{tag=\"$BACKUP_TAG\"} $duration"
+    echo "# HELP safekeep_${kind}_last_run_timestamp_seconds Unix time of the last ${kind} run."
+    echo "# TYPE safekeep_${kind}_last_run_timestamp_seconds gauge"
+    echo "safekeep_${kind}_last_run_timestamp_seconds{tag=\"$BACKUP_TAG\"} $now"
+    echo "# HELP safekeep_${kind}_last_success_timestamp_seconds Unix time of the last successful ${kind} run."
+    echo "# TYPE safekeep_${kind}_last_success_timestamp_seconds gauge"
+    echo "safekeep_${kind}_last_success_timestamp_seconds{tag=\"$BACKUP_TAG\"} ${last_success:-0}"
+    echo "# HELP safekeep_${kind}_last_exit_code Exit code of the last ${kind} run."
+    echo "# TYPE safekeep_${kind}_last_exit_code gauge"
+    echo "safekeep_${kind}_last_exit_code{tag=\"$BACKUP_TAG\"} $exit_code"
+    echo "# HELP safekeep_${kind}_last_duration_seconds Duration of the last ${kind} run."
+    echo "# TYPE safekeep_${kind}_last_duration_seconds gauge"
+    echo "safekeep_${kind}_last_duration_seconds{tag=\"$BACKUP_TAG\"} $duration"
     if [[ "$kind" == backup && "$exit_code" -eq 0 ]]; then
       local count size
       count="$(restic snapshots --tag "$BACKUP_TAG" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)"
       size="$(restic stats --mode raw-data --json 2>/dev/null | jq '.total_size' 2>/dev/null || echo 0)"
-      echo "# HELP backup_toolkit_snapshots Number of snapshots for this tag."
-      echo "# TYPE backup_toolkit_snapshots gauge"
-      echo "backup_toolkit_snapshots{tag=\"$BACKUP_TAG\"} $count"
-      echo "# HELP backup_toolkit_repository_size_bytes Deduplicated size of the repository."
-      echo "# TYPE backup_toolkit_repository_size_bytes gauge"
-      echo "backup_toolkit_repository_size_bytes{tag=\"$BACKUP_TAG\"} $size"
+      echo "# HELP safekeep_snapshots Number of snapshots for this tag."
+      echo "# TYPE safekeep_snapshots gauge"
+      echo "safekeep_snapshots{tag=\"$BACKUP_TAG\"} $count"
+      echo "# HELP safekeep_repository_size_bytes Deduplicated size of the repository."
+      echo "# TYPE safekeep_repository_size_bytes gauge"
+      echo "safekeep_repository_size_bytes{tag=\"$BACKUP_TAG\"} $size"
     fi
   } >"$tmp"
   chmod 0644 "$tmp"
@@ -115,7 +115,7 @@ notify_failure() {
   local what="$1" code="$2"
   [[ -n "$DISCORD_WEBHOOK_URL" ]] || return 0
   local msg
-  msg="$(jq -n --arg c ":red_circle: **${what} failed** on \`$(hostname -s)\` (exit ${code}). Check \`journalctl -u backup-toolkit\`." '{content:$c}')"
+  msg="$(jq -n --arg c ":red_circle: **${what} failed** on \`$(hostname -s)\` (exit ${code}). Check \`journalctl -u safekeep\`." '{content:$c}')"
   curl -fsS -m 10 -H 'Content-Type: application/json' -d "$msg" "$DISCORD_WEBHOOK_URL" -o /dev/null \
     || warn "discord notification failed"
 }
@@ -136,7 +136,7 @@ run_hooks() {
 
 with_lock() {
   exec 9>"$LOCK_FILE"
-  flock -n 9 || die "another backup-toolkit run is active ($LOCK_FILE)"
+  flock -n 9 || die "another safekeep run is active ($LOCK_FILE)"
   "$@"
 }
 
@@ -194,7 +194,7 @@ do_backup() {
 
 do_restore_test() {
   local target snapshot listing count=0 failed=0 path
-  target="$(mktemp -d /tmp/backup-toolkit-restore.XXXXXX)"
+  target="$(mktemp -d /tmp/safekeep-restore.XXXXXX)"
   # Global on purpose: the EXIT trap runs after this function's locals are gone.
   RESTORE_DIR="$target"
   trap 'rm -rf "${RESTORE_DIR:?}"' EXIT   # runs in a subshell, see run_tracked

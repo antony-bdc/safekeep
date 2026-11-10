@@ -1,11 +1,11 @@
 [Unit]
-Description=backup-toolkit: restic backup
+Description=safekeep: restic backup
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/backup-toolkit backup
+ExecStart=/usr/local/bin/safekeep backup
 Nice=10
 IOSchedulingClass=idle
 # Hardening: read everything, write only where backups/metrics/locks live.

@@ -1,10 +1,10 @@
 [Unit]
-Description=backup-toolkit: weekly restore test
-After=backup-toolkit.service
+Description=safekeep: weekly restore test
+After=safekeep.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/backup-toolkit restore-test
+ExecStart=/usr/local/bin/safekeep restore-test
 Nice=10
 IOSchedulingClass=idle
 ProtectSystem=strict

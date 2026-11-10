@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly backup-toolkit run
+Description=Nightly safekeep run
 
 [Timer]
 OnCalendar=*-*-* 03:15

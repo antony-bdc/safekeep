@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly backup-toolkit restore test
+Description=Weekly safekeep restore test
 
 [Timer]
 OnCalendar=Sun *-*-* 05:00
